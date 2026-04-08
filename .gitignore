@@ -1,0 +1,15 @@
+# Sécurité & Environnement
+.env
+venv/
+.venv/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Airflow & Docker locaux (Artefacts non trackables)
+logs/
+airflow.db
+airflow-webserver.pid
+.pytest_cache/

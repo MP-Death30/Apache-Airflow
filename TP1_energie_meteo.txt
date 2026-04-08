@@ -1,0 +1,24 @@
+Q1 : 
+- LocalExecutor : L'execution se réalise sur une seule machine en utilisant le multiprocessing.
+- CeleryExecutor: Distribue les tâches sur un pool de worckers persistants via un broker de message
+- KubernetesExecutor: Lance dynamiquement un pod éphémère sur un cluster K8s pour chaque tâche.
+RTE devrait utiliser 
+    - LocalExecutor pour les tests avant la mise en production des workflows sur une faible quantité de données.
+    - CeleryExecutor pour l'analyse constant du réseau électrique
+    - KubernetesExecutor pour un entrainement de modèles de machine learning massifs.
+Niveau scalabilité, le LocalExecutor s'exécute sur une seule machine donc une scalabilité verticale, les CeleryExecutor peut être déployé sur plusieurs machines donc scalable horizontalement et le KubernetesExecutor est comme le CeleryExecutor.
+
+Q2 :
+Dans le cas où les conteneur utilise "./dags:/opt/airflow/dags", c'est du "bind mount". Le "bind mont" lie le répertoire de la machine local avec celui à l'interieur du conteneur.
+Si l'on supprime ce mapping, le conteneur, lors de sa création, créera un répertoire dags vide.
+Dans une archtecture airflow multi-noeuds, il est difficile voir impossible de lier un répertoire local à différentes machines.
+
+Q3 :
+Avec une "start_date" non plus à aujourd'hui mais au 1er janvier et avec un catchup=True, cela lancerait une liste d'exécution de x * la cadence d'exécution afin de rattraper les résultats manquants.
+L'idempotence d'un DAG est le fait d'exécuter plusieurs fois un même code entraine aucun changement. Pour un pipeline de données cela est critique car les résultats doivent évoluer selon le temps, la conommation ou la production n'est pas stable au kWh près.
+Pour rendre les fonctions "collecter_" idempotentes il faut bloquer la date de collecte brute et non dynamique.
+
+Q4 :
+Le paramètre est indispendable car les dates de l'API sont au format français et donc pas en date et heure UTC. De plus, la France connait des changements d'heures.
+Lors du changement d'heure, on pourrait récupérer les données sur des plages horaires pouvant faire des doublons.
+Un exemple pourrait être lors de l'ajout d'une heure côté France et que l'on demande de récupérer les données de 00h00 à 23h00 UTC, on ne récupèrerait pas les réelles données de 00h00 à 01h00 et l'on récupèrerait les données de 00h00 +1j à 01h00 +1j.
