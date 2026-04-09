@@ -1,0 +1,17 @@
+Q1 :
+On ne peut pas simplement stocker les logs sur le disque local du serveur Airflow ou sur un NFS car tout le stockage reposerait sur une seule machine. Il faudrait donc augmenter la capacité de stockage constamment alors qu'avec HDFS et sa répartition des fichiers sur plusieurs machines, il est plus facile d'augmenter le stockage et la duplication des données via l'ajout de machine et cela sans risquer une interuption des services et les risques de défaillance.
+De plus, comme les données sont stockées sur plusieurs machines les flux peuvent être directement lancés sur les noeuds ayant les données nécessaires sans avoir à transferer les 50Go quotidien.
+
+Q2 :
+Si le NameNode tombe, on perd l'indexation des données donc on aurait toujours les données de stockées mais aucun moyen de connaître leur emplacement.
+Avec la mise en place l'architecture de haute disponibilité (High Availability), il y aurait une NameNode active et une autre en standby en cas de problème.
+Le rôle du Journal Node est de servir de point d'échange entre la NameNode active et celle en standby afin que les modifications faite par la node active soit copier dans la node en standby.
+
+Q3 :
+Le mode "poke" lance la tâche pour un intervalle de temps défini ce qui bloque un slot de worker durant cette période contrairement au mode "reschedule" qui dès que la tâche répond à la condition se lance puis se termine immédiatement après et se mettra dans la file d'attende plus tard.
+Pour l'utilisation du mode "poke" il faut privilégier une attente courte (quelques secondes/minutes) et utiliser "reschedule" pour les attentes plus longues.
+Un environnement Airflow est configuré avec un maximum de 4 workers simultanés. À minuit, 4 DAGs se lancent et exécutent un HdfsSensor en mode poke pour attendre un fichier qui n'arrivera qu'à 4h du matin. Les 4 slots sont verrouillés. Le pipeline est engorgé : aucune autre tâche, de n'importe quel DAG, ne pourra s'exécuter avant 4h du matin
+
+Q4 :
+En production, un client écrit sur un des DataNodeX qui une fois fini copie du le DataNodeY qui le transmet au DataNodeZ.
+HDFS garantie que tant que le fichier n'est pas entièrement écrit celui-ci n'est pas visible.
