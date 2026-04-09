@@ -239,7 +239,17 @@ def generer_rapport_energie(**context):
 
 @task
 def charger_config_regions():
-    return Variable.get("regions_energie", deserialize_json=True)
+    return Variable.get(
+        "regions_energie", 
+        deserialize_json=True, 
+        default_var=[
+            {"nom": "Île-de-France", "lat": 48.8566, "lon": 2.3522},
+            {"nom": "Occitanie", "lat": 43.6047, "lon": 1.4442},
+            {"nom": "Nouvelle-Aquitaine", "lat": 44.8378, "lon": -0.5792},
+            {"nom": "Auvergne-Rhône-Alpes", "lat": 45.7640, "lon": 4.8357},
+            {"nom": "Hauts-de-France", "lat": 50.6292, "lon": 3.0573}
+        ]
+    )
 
 
 @task(sla=None)
