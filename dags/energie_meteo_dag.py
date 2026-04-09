@@ -1,11 +1,13 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.utils import timezone
+from airflow.models import Variable
+from airflow.decorators import task
 from datetime import datetime, timedelta
 import pendulum
 import requests
 import logging
 import json
-from datetime import date
 
 # Timezone Paris pour RTE
 local_tz = pendulum.timezone("Europe/Paris")
@@ -25,7 +27,25 @@ default_args = {
     "email_on_failure": False,
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
+    "sla": timedelta(minutes=90),
 }
+
+
+def sla_miss_callback(dag, task_list, blocking_task_list, slas, blocking_tis):
+    logging.error(f"[ALERTE SLA] Déclenchement de la notification pour le DAG : {dag.dag_id}")
+
+    heure_actuelle = timezone.utcnow()
+
+    for sla in slas:
+        delai = heure_actuelle - sla.timestamp if sla.timestamp else "Non quantifiable"
+        logging.warning(f"[ALERTE SLA] Tâche en retard : {sla.task_id} | Délai mesuré : {delai}")
+        
+    if blocking_task_list:
+        logging.warning(
+            "[ALERTE SLA] Nœuds bloquants en cours d'exécution : %s",
+            [t.task_id for t in blocking_task_list]
+        )
+
 
 
 # --- Fonctions à implémenter (étapes 3 à 7) ---
@@ -58,40 +78,6 @@ def verifier_apis(**context):
             raise ValueError(f"Indisponibilité réseau API {nom} : {str(e)}")
     logging.info("Toutes les APIs sont disponibles. Pipeline autorisé à continuer.")
 
-def collecter_meteo_regions(**context):
-    """
-    Collecte pour chaque région : durée d'ensoleillement (h) et vitesse max du vent (km/h)
-    Retourne un dictionnaire {region: {ensoleillement_h: float, vent_kmh: float}}.
-    Ce dictionnaire sera automatiquement stocké dans XCom via le return.
-    """
-    BASE_URL = "https://api.open-meteo.com/v1/forecast"
-    resultats = {}
-    
-    for region, coords in REGIONS.items():
-        params = {
-            "latitude": coords["lat"],
-            "longitude": coords["lon"],
-            "daily": "sunshine_duration,wind_speed_10m_max",
-            "timezone": "Europe/Paris",
-            "forecast_days": 1,
-        }
-        
-        response = requests.get(BASE_URL, params=params, timeout=15)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        ensoleillement_h = data["daily"]["sunshine_duration"][0] / 3600.0
-        vent_kmh = data["daily"]["wind_speed_10m_max"][0]
-        
-        resultats[region] = {
-            "ensoleillement_h": ensoleillement_h,
-            "vent_kmh": vent_kmh
-        }
-        
-        logging.info(f"Région {region} traitée : {ensoleillement_h:.2f} h d'ensoleillement, vent max à {vent_kmh} km/h.")
-        
-    return resultats
 
 def collecter_production_electrique(**context):
     """
@@ -150,12 +136,19 @@ def analyser_correlation(**context):
     """
     ti = context["ti"]
     
-    donnees_meteo = ti.xcom_pull(task_ids="collecter_meteo_regions") or {}
+    donnees_meteo_list = ti.xcom_pull(task_ids="collecter_meteo_regions") or []
     donnees_production = ti.xcom_pull(task_ids="collecter_production_electrique") or {}
     
+    donnees_meteo = {}
+    for sous_dictionnaire in donnees_meteo_list:
+        if isinstance(sous_dictionnaire, dict):
+            donnees_meteo.update(sous_dictionnaire)
+            
     alertes = {}
+
+    regions_actives = donnees_meteo.keys()
     
-    for region in REGIONS:
+    for region in regions_actives:
         meteo = donnees_meteo.get(region, {})
         production = donnees_production.get(region, {})
         
@@ -185,7 +178,7 @@ def analyser_correlation(**context):
         }
         
     nb_alertes = sum(1 for r in alertes.values() if r["statut"] == "ALERTE")
-    logging.warning(f"{nb_alertes} région(s) en alerte sur {len(REGIONS)} analysées.")
+    logging.warning(f"{nb_alertes} région(s) en alerte sur {len(regions_actives)} analysées.")
     
     return alertes
 
@@ -243,6 +236,44 @@ def generer_rapport_energie(**context):
     return chemin
 
 
+
+@task
+def charger_config_regions():
+    return Variable.get("regions_energie", deserialize_json=True)
+
+
+@task(sla=None)
+def collecter_meteo_regions(region: dict, **context):
+    """
+    Collecte pour chaque région : durée d'ensoleillement (h) et vitesse max du vent (km/h)
+    Retourne un dictionnaire {region: {ensoleillement_h: float, vent_kmh: float}}.
+    Ce dictionnaire sera automatiquement stocké dans XCom via le return.
+    """
+    logical_date = context["ds"]
+    BASE_URL = "https://api.open-meteo.com/v1/forecast"
+    
+    params = {
+        "latitude": region["lat"],
+        "longitude": region["lon"],
+        "daily": "sunshine_duration,wind_speed_10m_max",
+        "timezone": "Europe/Paris",
+        "start_date": logical_date,
+        "end_date": logical_date,
+    }
+    
+    response = requests.get(BASE_URL, params=params, timeout=15)
+    response.raise_for_status()
+    data = response.json()
+    
+    return {
+        region["nom"]: {
+            "ensoleillement_h": data["daily"]["sunshine_duration"][0] / 3600.0,
+            "vent_kmh": data["daily"]["wind_speed_10m_max"][0]
+        }
+    }
+
+
+
 # --- Définition du DAG ---
 with DAG(
     dag_id="energie_meteo_dag",
@@ -252,6 +283,7 @@ with DAG(
     start_date=datetime(2024, 1, 1, tzinfo=local_tz),
     catchup=False,
     tags=["rte", "energie", "meteo", "open-data"],
+    sla_miss_callback=sla_miss_callback
 ) as dag:
     
     t1 = PythonOperator(
@@ -259,10 +291,8 @@ with DAG(
         python_callable=verifier_apis,
     )
 
-    t2 = PythonOperator(
-        task_id="collecter_meteo_regions",
-        python_callable=collecter_meteo_regions,
-    )
+    regions_config = charger_config_regions()
+    t2_dynamique = collecter_meteo_regions.expand(region=regions_config)
 
     t3 = PythonOperator(
         task_id="collecter_production_electrique",
@@ -277,7 +307,11 @@ with DAG(
     t5 = PythonOperator(
         task_id="generer_rapport_energie",
         python_callable=generer_rapport_energie,
+        sla=timedelta(minutes=45)
     )
 
 
-    t1 >> [t2, t3] >> t4 >> t5
+    t1 >> regions_config >> t2_dynamique
+    t1 >> t3
+    
+    [t2_dynamique, t3] >> t4 >> t5

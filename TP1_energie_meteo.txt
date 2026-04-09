@@ -14,7 +14,7 @@ Si l'on supprime ce mapping, le conteneur, lors de sa création, créera un rép
 Dans une archtecture airflow multi-noeuds, il est difficile voir impossible de lier un répertoire local à différentes machines.
 
 Q3 :
-Avec une "start_date" non plus à aujourd'hui mais au 1er janvier et avec un catchup=True, cela lancerait une liste d'exécution de x * la cadence d'exécution afin de rattraper les résultats manquants.
+Avec une "start_date" au 1er janvier 2024 et avec un catchup=True, cela lancerait une liste d'exécution de x * la cadence d'exécution afin de rattraper les résultats manquants.
 L'idempotence d'un DAG est le fait d'exécuter plusieurs fois un même code entraine aucun changement. Pour un pipeline de données cela est critique car les résultats doivent évoluer selon le temps, la conommation ou la production n'est pas stable au kWh près.
 Pour rendre les fonctions "collecter_" idempotentes il faut bloquer la date de collecte brute et non dynamique.
 
@@ -22,3 +22,12 @@ Q4 :
 Le paramètre est indispendable car les dates de l'API sont au format français et donc pas en date et heure UTC. De plus, la France connait des changements d'heures.
 Lors du changement d'heure, on pourrait récupérer les données sur des plages horaires pouvant faire des doublons.
 Un exemple pourrait être lors de l'ajout d'une heure côté France et que l'on demande de récupérer les données de 00h00 à 23h00 UTC, on ne récupèrerait pas les réelles données de 00h00 à 01h00 et l'on récupèrerait les données de 00h00 +1j à 01h00 +1j.
+
+
+# Exercice supplémentaire
+
+## Exo 1
+Q1 :
+Le SLA sert à notifier lorsqu'un flux prend plus de temps d'exécution que prévu alors qu'un execution_timeout dans cette même situation force l'arrêt du flux.
+Le SLA n'arrete pas la tâche puisque dans certaines situations un allongement du temps d'exécution peut être justifier comme une surcharge momentané du serveur.
+
