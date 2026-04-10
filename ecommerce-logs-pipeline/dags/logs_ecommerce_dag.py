@@ -2,6 +2,7 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.providers.apache.hdfs.sensors.web_hdfs import WebHdfsSensor
 from airflow.utils.trigger_rule import TriggerRule
+from hdfs_sensor import HdfsFileSensor
 from datetime import datetime
 from hdfs import InsecureClient
 from collections import Counter
@@ -183,15 +184,13 @@ with DAG(
         python_callable=uploader_vers_hdfs
     )
 
-    # Le HdfsSensor bloque l’exécution du pipeline jusqu’à ce que le fichier soit détecté dans HDFS.
-    # C’est un mécanisme de sécurité pour ne pas analyser un fichier qui ne serait pas encore complètement écrit.
-    t_sensor = WebHdfsSensor(
-        task_id="hdfs_file_sensor",
-        filepath="/data/ecommerce/logs/raw/access_{{ ds }}.log",
-        webhdfs_conn_id="hdfs_default",
-        poke_interval=30, # Vérifie toutes les 30 secondes
-        timeout=300, # Abandonne après 5 minutes
-        mode="reschedule", # Mode reschedule recommandé au lieu de poke
+    t_sensor = HdfsFileSensor(
+        task_id="attendre_fichier_hdfs",
+        hdfs_path="/data/ecommerce/logs/raw/access_{{ ds }}.log",
+        namenode_url="http://namenode:9870", # Substitution de la variable pour garantir l'exécution immédiate
+        poke_interval=30,
+        timeout=600,
+        mode="reschedule",
     )
 
     t_analyser = PythonOperator(

@@ -15,3 +15,10 @@ Un environnement Airflow est configuré avec un maximum de 4 workers simultanés
 Q4 :
 En production, un client écrit sur un des DataNodeX qui une fois fini copie du le DataNodeY qui le transmet au DataNodeZ.
 HDFS garantie que tant que le fichier n'est pas entièrement écrit celui-ci n'est pas visible.
+
+# Exercice supllémentaire
+
+1 :
+Le mode "reschedule" économise des workers Celery puisque s'il n'y a pas de déclenchement à l'instant où la tâche est lancée, celle-ci va être terminer pour libérer le worker et va rentrer dans la file d'attente plus tard.
+Ce mode est recommandé car rend plus disponible les workers pour d'autres tâches ne bloquant pas les autres flux.
+
