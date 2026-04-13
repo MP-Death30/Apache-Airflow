@@ -126,57 +126,36 @@ def pipeline_dvf():
     def traiter_donnees(hdfs_base_path: str) -> dict:
         hdfs_client = WebHDFSClient()
         
-        # 1. Détection dynamique de l'année la plus récente dans HDFS
         try:
             elements_hdfs = hdfs_client.list_status(hdfs_base_path)
-            annees_trouvees = []
-            
-            for element in elements_hdfs:
-                nom_dossier = element.get("pathSuffix", "")
-                if nom_dossier.startswith("annee="):
-                    try:
-                        # Extrait "2025" de "annee=2025"
-                        annees_trouvees.append(int(nom_dossier.split("=")[1]))
-                    except ValueError:
-                        continue
-                        
-            if not annees_trouvees:
-                raise ValueError("Aucun dossier de partition 'annee=...' trouvé.")
-                
+            annees_trouvees = [int(e.get("pathSuffix").split("=")[1]) for e in elements_hdfs if e.get("pathSuffix", "").startswith("annee=")]
             annee_cible = max(annees_trouvees)
-            logger.info(f"Année la plus récente détectée automatiquement : {annee_cible}")
-            
         except Exception as e:
-            raise RuntimeError(f"Échec de la détection automatique de l'année : {e}") from e
+            raise RuntimeError(f"Échec détection de l'année : {e}")
 
         dept_cible = "75"
-        
-        # 2. Partition pruning : ciblage direct
         chemin_partition = f"{hdfs_base_path}/annee={annee_cible}/dept={dept_cible}/dvf_{annee_cible}_{dept_cible}.csv"
-        
-        try:
-            csv_bytes = hdfs_client.open(chemin_partition)
-        except Exception as e:
-            raise RuntimeError(f"Échec de lecture de la partition {chemin_partition}.") from e
-        
+        csv_bytes = hdfs_client.open(chemin_partition)
         df = pd.read_csv(io.BytesIO(csv_bytes), sep='|', low_memory=False)
-        
-        lignes_initiales = len(df)
-        
-        # Filtres DVF (le filtre sur le code postal 750xx reste utile pour éliminer les anomalies potentielles de saisie)
+
+        # Extraction temporelle vectorisée sur la date de vente réelle
+        df['date_mutation'] = pd.to_datetime(df['date_mutation'], format='%d/%m/%Y', errors='coerce')
+        df = df.dropna(subset=['date_mutation'])
+        df['annee_mutation'] = df['date_mutation'].dt.year.astype(int)
+        df['mois_mutation'] = df['date_mutation'].dt.month.astype(int)
+
+        # Filtrage
         df = df[df['type_local'] == 'Appartement']
         df = df[df['nature_mutation'] == 'Vente']
         df = df[df['code_postal'].astype(str).str.startswith('750')]
         df = df[(df['surface_reelle_bati'] >= 9) & (df['surface_reelle_bati'] <= 500)]
         df = df[df['valeur_fonciere'] > 10000]
-        
-        logger.info(f"Filtrage sur partition {dept_cible}: {lignes_initiales} -> {len(df)} lignes")
-        
-        # Extraction mathématique de l'arrondissement
+
         df['arrondissement'] = df['code_postal'].astype(float).astype(int) % 100
         df['prix_m2'] = df['valeur_fonciere'] / df['surface_reelle_bati']
-        
-        agregats_df = df.groupby('arrondissement').agg(
+
+        # Agrégation multidimensionnelle : par année, mois et arrondissement
+        agregats_df = df.groupby(['annee_mutation', 'mois_mutation', 'arrondissement']).agg(
             code_postal=('code_postal', 'first'),
             prix_m2_moyen=('prix_m2', 'mean'),
             prix_m2_median=('prix_m2', 'median'),
@@ -186,29 +165,32 @@ def pipeline_dvf():
             surface_moyenne=('surface_reelle_bati', 'mean')
         ).reset_index()
 
-        stats_globales = {
-            "nb_transactions_total": int(df['valeur_fonciere'].count()),
-            "prix_m2_median_paris": float(df['prix_m2'].median()),
-            "prix_m2_moyen_paris": float(df['prix_m2'].mean()),
-            "arrdt_plus_cher": int(agregats_df.loc[agregats_df['prix_m2_median'].idxmax(), 'arrondissement']),
-            "arrdt_moins_cher": int(agregats_df.loc[agregats_df['prix_m2_median'].idxmin(), 'arrondissement']),
-            "surface_mediane": float(df['surface_reelle_bati'].median())
-        }
+        # Statistiques globales macro : par année et mois
+        stats_df = df.groupby(['annee_mutation', 'mois_mutation']).agg(
+            nb_transactions_total=('valeur_fonciere', 'count'),
+            prix_m2_median_paris=('prix_m2', 'median'),
+            prix_m2_moyen_paris=('prix_m2', 'mean'),
+            surface_mediane=('surface_reelle_bati', 'median')
+        ).reset_index()
+
+        idx_max = agregats_df.groupby(['annee_mutation', 'mois_mutation'])['prix_m2_median'].idxmax()
+        idx_min = agregats_df.groupby(['annee_mutation', 'mois_mutation'])['prix_m2_median'].idxmin()
+
+        stats_df['arrdt_plus_cher'] = agregats_df.loc[idx_max]['arrondissement'].values
+        stats_df['arrdt_moins_cher'] = agregats_df.loc[idx_min]['arrondissement'].values
 
         return {
             "agregats": agregats_df.to_dict('records'),
-            "stats_globales": stats_globales,
-            "annee_donnees": annee_cible  # <-- On transmet l'information aux tâches suivantes
+            "stats_globales": stats_df.to_dict('records'),
+            "annee_donnees": int(stats_df['annee_mutation'].max()),
+            "mois_donnees": int(stats_df[stats_df['annee_mutation'] == stats_df['annee_mutation'].max()]['mois_mutation'].max())
         }
 
     @task(task_id="inserer_postgresql")
-    def inserer_postgresql(resultats: dict) -> dict: # Note: on change le retour en dict pour la suite
+    def inserer_postgresql(resultats: dict) -> dict:
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
         agregats = resultats.get("agregats", [])
-        stats = resultats.get("stats_globales", {})
-        
-        annee = resultats.get("annee_donnees", datetime.now().year)
-        mois = 1
+        stats = resultats.get("stats_globales", [])
         
         upsert_agregats = """
             INSERT INTO prix_m2_arrondissement
@@ -226,7 +208,7 @@ def pipeline_dvf():
         
         for arr in agregats:
             hook.run(upsert_agregats, parameters=(
-                str(arr['code_postal']), int(arr['arrondissement']), annee, mois,
+                str(arr['code_postal']), int(arr['arrondissement']), int(arr['annee_mutation']), int(arr['mois_mutation']),
                 float(arr['prix_m2_moyen']), float(arr['prix_m2_median']), float(arr['prix_m2_min']), float(arr['prix_m2_max']),
                 int(arr['nb_transactions']), float(arr['surface_moyenne'])
             ))
@@ -244,12 +226,15 @@ def pipeline_dvf():
             surface_mediane = EXCLUDED.surface_mediane,
             date_calcul = NOW();
         """
-        hook.run(upsert_stats, parameters=(
-            annee, mois, stats['nb_transactions_total'], stats['prix_m2_median_paris'], stats['prix_m2_moyen_paris'],
-            stats['arrdt_plus_cher'], stats['arrdt_moins_cher'], stats['surface_mediane']
-        ))
 
-        return {"lignes": len(agregats), "annee_donnees": annee, "mois_donnees": mois}
+        for st in stats:
+            hook.run(upsert_stats, parameters=(
+                int(st['annee_mutation']), int(st['mois_mutation']), int(st['nb_transactions_total']),
+                float(st['prix_m2_median_paris']), float(st['prix_m2_moyen_paris']),
+                int(st['arrdt_plus_cher']), int(st['arrdt_moins_cher']), float(st['surface_mediane'])
+            ))
+
+        return {"annee_donnees": resultats.get("annee_donnees"), "mois_donnees": resultats.get("mois_donnees")}
 
     @task(task_id="generer_rapport")
     def generer_rapport(contexte: dict) -> str:
@@ -277,45 +262,14 @@ def pipeline_dvf():
     @task(task_id="analyser_tendances")
     def analyser_tendances(rapport_genere: str, contexte: dict) -> str:
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
-        annee = contexte.get("annee_donnees", datetime.now().year)
-        mois = contexte.get("mois_donnees", datetime.now().month)
-
-        # 1. Requête SQL corrigée pour le calcul par arrondissement
-        # (Gestion du passage de l'année Janvier -> Décembre ajoutée)
-        query_arrondissements = """
-            SELECT
-                a.arrondissement,
-                a.prix_m2_median AS prix_actuel,
-                b.prix_m2_median AS prix_precedent,
-                ROUND(
-                    ((a.prix_m2_median - b.prix_m2_median) / b.prix_m2_median) * 100,
-                    2
-                ) AS variation_pct
-            FROM prix_m2_arrondissement a
-            JOIN prix_m2_arrondissement b
-                ON a.arrondissement = b.arrondissement
-                AND (
-                    (a.annee = b.annee AND a.mois = b.mois + 1)
-                    OR (a.annee = b.annee + 1 AND a.mois = 1 AND b.mois = 12)
-                )
-            WHERE a.annee = %s AND a.mois = %s
-            ORDER BY variation_pct DESC;
-        """
-        
-        records = hook.get_records(query_arrondissements, parameters=(annee, mois))
-        
-        logger.info("\n--- Évolution Mois sur Mois (Arrondissements) ---")
-        for r in records:
-            logger.info(f"Arrdt {r[0]:>2}: {r[1]:.0f} €/m2 vs {r[2]:.0f} €/m2 -> {r[3]:>+5.2f} %")
-
-        # 2. Stockage dans stats_marche
-        # Étape A : Créer la colonne si elle n'existe pas
         hook.run("ALTER TABLE stats_marche ADD COLUMN IF NOT EXISTS variation_globale_pct NUMERIC(5,2);")
 
-        # Étape B : Calculer la tendance globale de Paris et l'insérer dans stats_marche
+        # Exécution du calcul d'évolution globale sur l'intégralité du dataset persistant
         query_update_stats = """
             WITH evolution_globale AS (
                 SELECT
+                    a.annee,
+                    a.mois,
                     ROUND(
                         ((a.prix_m2_median_paris - b.prix_m2_median_paris) / b.prix_m2_median_paris) * 100,
                         2
@@ -324,15 +278,15 @@ def pipeline_dvf():
                 JOIN stats_marche b
                     ON (a.annee = b.annee AND a.mois = b.mois + 1)
                        OR (a.annee = b.annee + 1 AND a.mois = 1 AND b.mois = 12)
-                WHERE a.annee = %s AND a.mois = %s
             )
-            UPDATE stats_marche
-            SET variation_globale_pct = (SELECT variation FROM evolution_globale)
-            WHERE annee = %s AND mois = %s;
+            UPDATE stats_marche s
+            SET variation_globale_pct = e.variation
+            FROM evolution_globale e
+            WHERE s.annee = e.annee AND s.mois = e.mois;
         """
-        hook.run(query_update_stats, parameters=(annee, mois, annee, mois))
+        hook.run(query_update_stats)
 
-        return "Tendances calculées et stockées."
+        return "Tendances recalculées sur l'intégralité de l'historique DVF."
 
     t_verif = verifier_sources()
     t_download = telecharger_dvf(t_verif)
