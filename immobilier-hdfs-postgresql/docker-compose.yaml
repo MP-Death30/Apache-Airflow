@@ -101,6 +101,7 @@ services:
       - HDFS_CONF_dfs_webhdfs_enabled=true
       - HDFS_CONF_dfs_permissions_enabled=false
       - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+      - HDFS_CONF_dfs_replication=2   # <-- Ajout de la règle de réplication
     volumes:
       - namenode-data:/hadoop/dfs/name
     networks:
@@ -122,11 +123,29 @@ services:
       - hdfs-namenode
     networks:
       - dvf-network
+
+  hdfs-datanode-2:                    # <-- Ajout du second DataNode
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: dvf-datanode-2
+    ports:
+      - "9865:9864"                   # <-- Mappage sur le port 9865 de votre PC pour éviter le conflit
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://hdfs-namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_webhdfs_enabled=true
+      - HDFS_CONF_dfs_permissions_enabled=false
+    volumes:
+      - datanode-data-2:/hadoop/dfs/data  # <-- Volume dédié
+    depends_on:
+      - hdfs-namenode
+    networks:
+      - dvf-network
  
 volumes:
   postgres-data:
   namenode-data:
   datanode-data:
+  datanode-data-2:                    # <-- Déclaration du nouveau volume
  
 networks:
   dvf-network:
